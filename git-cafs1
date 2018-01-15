@@ -1,0 +1,272 @@
+#!/bin/sh
+#
+# git-cafs1 - content addressable file storage (sha1) in git repositories
+#
+# Author: Tomi Ollila -- too ät iki piste fi
+#
+#	Copyright (c) 2017-2018 Tomi Ollila
+#	    All rights reserved
+#
+# Created: Sat 15 Apr 2017 12:07:45 EEST too
+# Last modified: Mon 15 Jan 2018 23:06:34 +0200 too
+
+# This program copies single files in and out of a (separate) git repository,
+# i.e. providing a way to store and load (large) files in git.
+# The ssh, http, https, git and local file protocols are (mostly) supported.
+
+# As Git, this software is distributed under the terms of the GNU GPL version 2
+# https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html
+
+case ${BASH_VERSION-} in *.*) set -o posix; shopt -s xpg_echo; esac
+case ${ZSH_VERSION-} in *.*) emulate ksh; esac
+
+set -euf
+
+die () { printf '%s\n' "$*"; exit 1; } >&2
+warn () { printf '%s\n' "$*"; } >&2
+
+x () { printf '+ %s\n' "$*" >&2; "$@"; }
+x_exec () { printf '+ %s\n' "$*" >&2; exec "$@"; die "exec '$*' failed"; }
+
+usage () {
+	exec >&2
+	printf '\nUsage: %s %s %s\n' "$bn0" "$cmd" "$1"
+	echo
+	test $# -gt 1 || exit 1
+	shift
+	printf '%s\n' "$@"
+	echo
+	exit 1
+}
+
+get_remote () {
+	suff=
+	case $1 in *:*) remote=$1
+		;; */*) test -d "$1" && remote=$1 ||
+			remote=`x_exec git config --get remote.$1.url`
+		;; *) remote=`x_exec git config --get remote.${1%-*}.url`
+		      case $1 in *-*) suff=-${1##*-}; esac
+	esac
+	case $remote in */.git) rx=/.git remote=${remote%/.git}
+		     ;; *.git) rx=.git remote=${remote%.git}
+		     ;; *) rx=
+	esac
+	remote=$remote$suff$rx
+	printf '%s\n' "git-cafs1 repository: $remote" >&2
+}
+
+_uwr () {
+	usage "$1" \
+	  "{repo} is either url, or extended named remote" \
+	  "examples: 'git@example.org:dotfiles' and 'origin-cafs1'" \
+	  ${2+''} ${2+"$2"}
+}
+
+set_tmpdir () {
+	tmpdir=`exec mktemp -d "$1"/td.XXXXXX`
+	trap 'rm -rf "$tmpdir"; trap - 0' 0 INT HUP TERM QUIT
+}
+
+export GIT_AUTHOR_NAME='git cafs1'
+export GIT_AUTHOR_EMAIL='git.cafs1@not.an.example'
+export GIT_AUTHOR_DATE='1111111111 +0000'
+export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
+export GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
+export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+
+
+cmd_get () # get files from repository (by git.object.hash...)
+{
+	test $# -gt 2 ||
+		_uwr "{repo} {target-dir} {hash,size} [hash,size...]"
+	get_remote "$1"
+	trgdir=$2
+	test -d $trgdir || die "'$trgdir': no such directory"
+	shift 2
+	for fidn; do
+		fb=${fidn%,*} fs=${fidn##*,}
+		# do checks
+		test ${#fb} -eq 40 || die "'$fb': not 40 in length"
+		case ${fb} in *[!0-9a-f]*)
+			die "'$fb' contains non-hex characters"
+		esac
+		case $fs in *[!0-9]*)
+			die "'$fs' contains non-digit characters"
+		esac
+	done
+	set_tmpdir "$trgdir"
+	echo Creating temporary local repositories where to clone the files
+	for fidn; do
+		if test -e "$trgdir/$fidn"
+		then	echo "'$trgdir/$fidn' exists -- download skipped"
+			continue
+		fi
+		x git clone --depth=1 --single-branch --branch "$fidn" \
+			"$remote" "$tmpdir"/git
+		th=`exec git hash-object "$tmpdir"/git/"$fidn"`
+		fb=${fidn%,*}
+		if test "$th" != "$fb"
+		then	warn "Hash of downloaded file '$th' differs from '$fb'"
+			trg=mismatch-$fidn
+		else	trg=$fidn
+		fi
+		x mv "$tmpdir"/git/"$fidn" "$trgdir/$trg"
+		rm -rf "$tmpdir"/git
+	done
+}
+
+cmd_put () # put files to repository (by filename...)
+{
+	test $# -gt 1 || _uwr '{repo} {file} [file...]'
+	get_remote "$1"; shift
+	set_tmpdir "$PWD"
+
+	GIT_DIR=$tmpdir; export GIT_DIR
+	git init --bare
+	ec=
+	for f
+	do	blob_hash=`exec git hash-object -w "$f"`
+		size=`exec git cat-file -s "$blob_hash"`
+		rref=$blob_hash,$size
+		git --git-dir "$tmpdir" update-index --add --cacheinfo \
+			100644 "$blob_hash" "$rref"
+		tree=`exec git write-tree`
+		commit=`exec git commit-tree -m . $tree`
+		git --no-pager log --name-status $commit
+		x git push "$remote" "$commit:refs/heads/$rref" || ec=$ec.
+		rm -rf "$GIT_DIR"/index "$GIT_DIR"/objects/??/*
+	done
+	if test "$ec"
+	then die "${#ec} pushes failed"
+	fi
+}
+
+cmd_list () # [--raw] list (hashes of) files in repository
+{
+	test "${1-}" = --raw && { filter=cat; shift; } ||
+		filter='sed -n '\''/refs\/heads\/[0-9a-f]\{40\}/ s|.*/heads/| |p'\'
+	test $# -gt 0 || _uwr '[--raw] {repo}'
+	get_remote "$1"; shift
+	git ls-remote "$remote" | eval $filter
+}
+
+_make_init_ssh ()
+{
+	case $remote in *"'"*) # unlikely, but possible
+		# note: using $() instead of `` due to \-expansion differences
+		remote=$(printf %s "$remote" | sed "s/'/'\\\\''/g")
+	esac
+	case $remote in *.git) ;; *) remote=$remote.git ;; esac
+	ssh $host "mkdir '$remote'
+		git -C '$remote' init --bare --template=/dev/null"
+}
+
+_make_init_file ()
+{
+	case $1 in *.git) ;; *) set -- "$1".git ;; esac
+	mkdir "$1"
+	git -C "$1" init --bare --template=/dev/null
+}
+
+cmd_make () # make new git-cafs1 repository (e.g. push readme to master)
+{
+	case ${1-} in --init-repo) init=true; shift ;; *) init=false ;; esac
+	test $# -gt 0 || usage "[--init-repo] {repo}"
+	if $init
+	then case $1
+		in *:////*) die "3 (or more) slashes in '$1'"
+
+		;; file:///*) _make_init_file "${1#file://}"
+
+		;; file://*) die "file:/// (i.e. 3 slashes) prefix required"
+
+		;; *:///*) die "3 (or more) slashes in '$1'"
+
+		;; http*://* | git:*)
+			die "Cannot init repository using this protocol"
+
+		;; ssh://*)
+			remote=${1#ssh://} # drop ssh:// prefix
+			host=${remote%%/*} remote=${remote#*/}
+			case $remote in '~/'*) remote=${remote#??}
+					;; *) remote=/$remote
+			esac
+			case $host in *:*) host="-p ${host#*:} ${host%%:*}"
+			esac
+			_make_init_ssh
+		# ssh#2
+		;; *:*)
+			host=${1%%:*} remote=${1#*:}
+			_make_init_ssh
+		# file
+		;; *) _make_init_file "$1"
+	esac; fi
+	remote=$1
+	set_tmpdir /tmp
+	(cd "$tmpdir" && exec git init --template=/dev/null)
+	printf > "$tmpdir"/README %s\\n '' \
+	      'Content-addressable file storage in Git repository' \
+	      '==================================================' '' \
+	      'Every file is in its own branch, named by the' \
+	      'content-addressable name (40 char git hash) of' \
+	      "the file stored there. The tool 'git-cafs1'" \
+	      'is used to access these files.' '' \
+	      'If you cloned this repository, you have' \
+	      'taken backup of it -- congratulations.' ''
+
+	(cd "$tmpdir" && git add README && exec git commit -m .)
+	git --git-dir $tmpdir/.git push "$remote" HEAD:master
+}
+
+
+unset setx
+case ${1-} in -x) setx=t; shift # hint: PS4='$LINENO: ' me -x .. helps further
+esac
+
+bn0=${0##*/}
+
+if test $# = 0
+then	echo
+	echo Usage: $bn0 '[-x] <command> [args]'
+	echo
+	echo $bn0 commands available:
+	echo
+	sed -n '/^cmd_[a-z0-9_]/ { s/cmd_/ /; s/ () [ #]*/                   /
+		s/$0/'"$bn0"'/g; s/\(.\{8\}\) */\1/p; }' "$0"
+	echo
+	echo Command can be abbreviated to any unambiguous prefix.
+	echo
+	exit 0
+fi
+
+cm=$1; shift
+
+case $cm
+in ls) cm=list
+esac
+
+cc= cp=
+for m in `exec sed -n 's/^cmd_\([a-z0-9_]*\) (.*/\1/p' "$0"`
+do
+	case $m
+	in	$cm) cp= cc=1 cmd=$cm; break
+	;;	$cm*) cp=$cc; cc="$m $cc"; cmd=$m
+	esac
+done
+
+test   "$cc" || { echo $0: $cm -- command not found.; exit 1; }
+test ! "$cp" || { echo $0: $cm -- ambiguous command: matches $cc; exit 1; }
+
+unset cc cp cm
+case ${setx-} in t) unset setx; set -x
+esac
+cmd_$cmd "$@"
+exit
+
+# Local variables:
+# mode: shell-script
+# sh-basic-offset: 8
+# sh-indentation: 8
+# tab-width: 8
+# End:
+# vi: set sw=8 ts=8

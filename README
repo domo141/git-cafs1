@@ -1,0 +1,59 @@
+
+git-cafs1 -- content addressable file storage in git repositories
+=================================================================
+
+Use standard git remotes protocols to put and get single files
+to any git repository providing these standard interfaces.
+
+This feature is implemented by storing the file to a (empty) branch
+whose name is the size of the file concatenated to the git object
+id (sha1 hash) of the file. "Cloning" just that single branch
+downloads just that one file that is stored there.
+
+The git-cafs1 command -- this one shell script -- does it all:
+
+    Usage: git-cafs1 [-x] <command> [args]
+
+    git-cafs1 commands available:
+
+      get    get files from repository (by git.object.hash...)
+      put    put files to repository (by filename...)
+      list   [--raw] list (hashes of) files in repository
+      make   make new git-cafs1 repository (e.g. push readme to master)
+
+    Command can be abbreviated to any unambiguous prefix.
+
+
+Example:
+''''''''
+
+After first ./git-cafs1 make --init-repo remote-host:vc/wip/git-cafs1-cafs1.git
+
+('origin' being remote-host:vc/wip/git-cafs1.git)
+
+And then  ./git-cafs1 put origin-cafs1 /dev/null
+          ./git-cafs1 put origin-cafs1 git-cafs1
+
+Executing  ./git-cafs1 list origin-cafs1  printed:
+
+    + git config --get remote.origin.url
+    git-cafs1 repository: remote-host:vc/wip/git-cafs1-cafs1.git
+    b40e4f47b9416114a6e6d6c8e0e42cf633a4ab21,7189
+    e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,0
+
+Now
+
+  ./git-cafs1 get origin-cafs1 . b40e4f47b9416114a6e6d6c8e0e42cf633a4ab21,7189
+
+downloaded b40e4f47b9416114a6e6d6c8e0e42cf633a4ab21,7189 (containing
+initial version of git-cafs1 program) to the current directory (.).
+
+
+That's it!
+''''''''''
+
+This implementation uses `git clone` to get a file, using (temporarily)
+double the disk space where first cloning the branch. In the future one
+could create program that streams the file straight out while communicating
+with the "server" (with 'file' protocol one could already `git cat-file`
+the content).
