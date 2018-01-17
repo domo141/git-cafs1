@@ -48,6 +48,15 @@ Now
 downloaded b40e4f47b9416114a6e6d6c8e0e42cf633a4ab21,7189 (containing
 initial version of git-cafs1 program) to the current directory (.).
 
+For reference:
+
+    git hash-object git-cafs1
+    b40e4f47b9416114a6e6d6c8e0e42cf633a4ab21
+
+    { printf 'blob 7189\0';
+      cat b40e4f47b9416114a6e6d6c8e0e42cf633a4ab21,7189; } | sha1sum
+    b40e4f47b9416114a6e6d6c8e0e42cf633a4ab21  -
+
 
 That's it!
 ''''''''''
